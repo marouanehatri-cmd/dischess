@@ -24,12 +24,29 @@ jobs:
         run: |
           mkdir www
           cp index.html sf.json stockfish-19-lite-single.js stockfish-19-lite-single.wasm www/
+          cp chess.min.js www/ || echo 'chess.min.js not found - the app will use the internet copy'
+
+      - name: Bundle offline files (chess library + opening book)
+        run: |
+          [ -f www/chess.min.js ] || curl -fsSL -o www/chess.min.js https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js
+          mkdir -p www/openings
+          for f in a b c d e; do
+            curl -fsSL -o www/openings/$f.tsv https://raw.githubusercontent.com/lichess-org/chess-openings/master/$f.tsv || echo "could not download $f.tsv"
+          done
+          curl -fsSL -o www/jsQR.js https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js || echo "could not download jsQR"
+          ls -l www www/openings
 
       - name: Install Capacitor
         run: npm install
 
       - name: Create Android project
         run: npx cap add android
+
+      - name: Allow the camera (for scanning QR codes)
+        run: |
+          f=android/app/src/main/AndroidManifest.xml
+          grep -q 'android.permission.CAMERA' "$f" || sed -i 's#<application#<uses-permission android:name="android.permission.CAMERA" />\n    <application#' "$f"
+          grep -n 'CAMERA' "$f"
 
       - name: Build debug APK
         run: |
@@ -40,4 +57,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: chess-apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          path: android/app/build/outputs/apk/debug/ap
+          p-debug.apk
