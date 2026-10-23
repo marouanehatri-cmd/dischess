@@ -271,11 +271,16 @@ function sfCDN(){sfStart(URL.createObjectURL(new Blob(['importScripts("https://c
 function initSF(){setEng();fetch('sf.json').then(r=>r.json()).then(j=>sfStart(new URL(j.js,location.href).href+'#'+new URL(j.wasm,location.href).pathname,30000,sfCDN)).catch(sfCDN)}
 function onW(w,l){if(l.startsWith('id name ')){if(w===sf)sfName=l.slice(8);return}if(l=='uciok'){w.ok=true;if(w===sf){sfReady=true;setEng()}return}
 const job=w.job;if(job&&l.startsWith('info')){const m=l.match(/ score (cp|mate) (-?\d+)( lowerbound| upperbound)?/);
-if(m&&!m[3]&&/ multipv 2\b/.test(l)){job.t2=m[1];job.v2=+m[2];const pv=l.match(/ pv (\S+)/);if(pv)job.pv2=pv[1]}
-if(m&&!m[3]&&!/ multipv (?!1\b)/.test(l)){job.t=m[1];job.v=+m[2];const q=l.match(/ wdl (\d+) (\d+) (\d+)/);if(q)job.w=(+q[1]+ +q[2]/2)/10;const d=l.match(/ depth (\d+)/);if(d)job.d=+d[1]}}
+if(m&&!m[3]&&/ multipv 2\b/.test(l)){job.t2=m[1];job.v2=+m[2];const pv=l.match(/ pv (\S+)/);if(pv)job.pv2=pv[1];sbChk(w,job)}
+if(m&&!m[3]&&!/ multipv (?!1\b)/.test(l)){job.t=m[1];job.v=+m[2];const q=l.match(/ wdl (\d+) (\d+) (\d+)/);if(q)job.w=(+q[1]+ +q[2]/2)/10;const d=l.match(/ depth (\d+)/);if(d)job.d=+d[1];const p1=l.match(/ pv (\S+)/);job.pm=p1?p1[1]:'';if(job.es==2)sbChk(w,job)}}
 if(l.startsWith('bestmove')&&job){w.job=null;job.best=l.split(' ')[1];const pm=l.match(/ponder (\S+)/);if(pm)job.pnd=pm[1];job.res(job)}}
 function onSF(l){onW(sf,l)}
-function wGo(w,fen,go,ms){return new Promise(res=>{const j={res};w.job=j;w.postMessage('position fen '+fen);w.postMessage('go '+go);setTimeout(()=>{if(w.job===j){w.job=null;res({best:null})}},ms||40000)})}
+/* stop a search as soon as best move + 2nd move + both evals stayed the same for 3 depths in a row (result already converged) */
+function sbChk(w,job){if(!job.es||job.stopped||!job.pm)return;const h=job.hs||(job.hs=[]),c={d:job.d,t:job.t,v:job.v,m:job.pm,t2:job.t2,v2:job.v2,m2:job.pv2};
+if(h.length&&h[h.length-1].d==c.d)return;h.push(c);if(!(c.d>=SB_D)||h.length<3)return;const a=h.slice(-3),one=job.es==2,rg=k=>Math.max(...a.map(x=>x[k]))-Math.min(...a.map(x=>x[k]));
+const ok=a.every(x=>x.m==a[0].m&&x.t==a[0].t&&(one||(x.m2&&x.m2==a[0].m2&&x.t2==a[0].t2)))&&(a[0].t=='mate'?rg('v')==0:rg('v')<=SB_CP)&&(one||a[0].t2=='mate'?(one||rg('v2')==0):rg('v2')<=SB_CP2);
+if(ok){job.stopped=1;try{w.postMessage('stop')}catch(e){}}}
+function wGo(w,fen,go,ms,es){return new Promise(res=>{const j={res,es};w.job=j;w.postMessage('position fen '+fen);w.postMessage('go '+go);setTimeout(()=>{if(w.job===j){w.job=null;res({best:null})}},ms||40000)})}
 function sfGo(fen,go){return wGo(sf,fen,go)}
 let pondP=null,pondFen=null,pondT=0,pondR=null;
 function pondUse(fen){return !!(pondR&&pondFen===fen&&pondR.best&&pondR.best!='(none)'&&Date.now()-pondT>=500)}
@@ -566,15 +571,16 @@ function loadBook(){return BKP||(BKP=(async()=>{
  if(tx&&set.size>2000)try{localStorage.setItem('obk2',Date.now()+'|'+[...set].map(x=>x.toString(36)).join(','))}catch(e){}
  return set})())}
 /* analysis */
-const RD=15,RT=5000; /* review depth + time cap per position */
+const RD=15,RT=5000,AB=17000; /* review depth + time cap per position + total time budget (ms) */
+const SB_D=11,SB_CP=5,SB_CP2=10; /* early stop: min depth, max eval wobble of best / 2nd line over the last 3 depths */
 let BM2=[],V2=[];
 /* Expected points depend on the player's rating (as on Chess.com): lower rating = flatter curve */
 const kR=R=>.00368208*Math.max(.62,Math.min(1.1,.62+.38*(R-600)/1700)),ep=(cp,R)=>50+50*(2/(1+Math.exp(-kR(R)*cp))-1);
 /* net material the opponent can win if he takes the piece that just moved (recaptures counted) */
 function sacNet(f1,m,sv){const q=new Chess(f1);let w=0;for(const x of q.moves({verbose:true}).filter(y=>y.to==m.to&&y.captured)){const q2=new Chess(f1);q2.move({from:x.from,to:x.to,promotion:x.promotion});const rec=q2.moves({verbose:true}).some(y=>y.to==m.to&&y.captured);w=Math.max(w,sv[m.piece]-(m.captured?sv[m.captured]:0)-(rec?sv[x.piece]:0))}return w}
-async function evalFen(fen,wk){const c=new Chess(fen),sg=c.turn()=='b'?-1:1;if(c.in_checkmate())return{v:-1000*sg,w:sg==1?0:100};if(c.game_over())return{v:0,w:50};let v=0,b=null,w=null,v2=null,b2=null;
-if(wk){const j=await wGo(wk,fen,'depth '+RD+' movetime '+RT);v=j.t=='mate'?(j.v>0?1000:-1000):(j.v||0);b=j.best;if(j.v2!=null){v2=j.t2=='mate'?(j.v2>0?1000:-1000):j.v2;b2=j.pv2||null}}
-else{g.load(fen);dl=Date.now()+600;for(let d=1;d<=5;d++){to=false;const q=srch(d,-1e9,1e9,0);if(to)break;v=q}}
+async function evalFen(fen,wk,mt){const c=new Chess(fen),sg=c.turn()=='b'?-1:1;if(c.in_checkmate())return{v:-1000*sg,w:sg==1?0:100};if(c.game_over())return{v:0,w:50};let v=0,b=null,w=null,v2=null,b2=null;
+if(wk){const tm=Math.min(RT,mt||RT),j=await wGo(wk,fen,'depth '+RD+' movetime '+Math.round(tm),tm+4000,c.moves().length==1?2:1);v=j.t=='mate'?(j.v>0?1000:-1000):(j.v||0);b=j.best;if(j.v2!=null){v2=j.t2=='mate'?(j.v2>0?1000:-1000):j.v2;b2=j.pv2||null}}
+else{g.load(fen);dl=Date.now()+Math.min(600,mt||600);for(let d=1;d<=5;d++){to=false;const q=srch(d,-1e9,1e9,0);if(to)break;v=q}}
 v=Math.max(-1000,Math.min(1000,v*sg));if(w==null)w=50+50*(2/(1+Math.exp(-0.00368208*v))-1);if(v2!=null)v2=Math.max(-1000,Math.min(1000,v2*sg));return{v,b,w,v2,b2}}
 const NET={on:false,pc:null,dc:null,role:'',stun:false,tx:'rtc',peer:'',last:0,ms:null};
 function dbg(x){const e=$('fdbg');if(e)e.textContent=x}
@@ -668,14 +674,20 @@ function slideReview(){const els=['co','bw','nv','ab'].map($).concat([...documen
 const cb=document.querySelector('#co .cb');if(cb){cb.classList.remove('cbin');void cb.offsetWidth;cb.classList.add('cbin')}setTimeout(()=>els.forEach(e=>e&&e.classList.remove('slin')),420)}
 function startReview(){showPage('rev');goTo(1);$('rv').scrollTop=0;const cb=document.querySelector('#co .cb');if(cb){cb.classList.remove('cbin');void cb.offsetWidth;cb.classList.add('cbin')}}
 function phr(a){const L=lang=='ar';return a>=85?(L?'مباراة رائعة! لنرَ أبرز اللحظات.':"Great game! Let's see what stood out."):a>=65?(L?'وجدت بعض الجواهر هنا! لنتعمق في اللحظات التكتيكية.':"You found some gems in there! Let's dig into that tactical find."):(L?'لنحلل اللحظات المهمة في هذه المباراة.':"Let's break down the key moments of this game.")}
-$('ba').onclick=async()=>{if(busy)return;hist=g.history({verbose:true});if(!hist.length){msg=t('nm');draw();return}
+$('ba').onclick=async()=>{const T0=Date.now();if(busy)return;hist=g.history({verbose:true});if(!hist.length){msg=t('nm');draw();return}
 busy=true;anRun=true;viewFen=null;msg='';const viaM=$('gm').classList.contains('on');if(!viaM)spin(true,'');const bkP=loadBook().catch(()=>null),pgn=g.pgn(),tt=new Chess();fens=[tt.fen()];
 for(const m of hist){tt.move({from:m.from,to:m.to,promotion:m.promotion});fens.push(tt.fen())}
 if(sf&&sfReady){await pondKill();['UCI_LimitStrength value false','Skill Level value 20','MultiPV value 2','UCI_ShowWDL value true'].forEach(x=>sf.postMessage('setoption name '+x));sf.postMessage('ucinewgame')}
 const N=fens.length;E=Array(N);BM=Array(N);W=Array(N);BM2=Array(N);V2=Array(N);let nx=0,dn=0,extra=[];
-if(sf&&sfReady){const np=Math.max(1,Math.min(4,(navigator.hardwareConcurrency||4)-1));extra=await mkPool(np-1);const pool=[sf].concat(extra);
-await Promise.all(pool.map(async w=>{while(!anAbort){const i=nx++;if(i>=N)break;const o=await evalFen(fens[i],w);E[i]=o.v;BM[i]=o.b;W[i]=o.w;BM2[i]=o.b2;V2[i]=o.v2;dn++;anTxt(t('anl')+Math.round(dn*100/N)+'%')}}));extra.forEach(w=>{try{w.terminate()}catch(e){}})}
-else{for(let i=0;i<N;i++){if(anAbort)break;anTxt(t('anl')+Math.round(i*100/(N-1||1))+'%');await new Promise(r=>setTimeout(r,0));const o=await evalFen(fens[i]);E[i]=o.v;BM[i]=o.b;W[i]=o.w;BM2[i]=o.b2;V2[i]=o.v2}}
+const DL=T0+AB;
+if(sf&&sfReady){const np=Math.max(1,Math.min(4,(navigator.hardwareConcurrency||4)-1));let npE=np,closed=false;const loops=[];
+const share=i=>Math.max(150,Math.min(RT,(DL-Date.now())*npE/Math.max(1,N-i)));
+const run=w=>{loops.push((async()=>{while(!anAbort){const i=nx++;if(i>=N)break;const o=await evalFen(fens[i],w,share(i));E[i]=o.v;BM[i]=o.b;W[i]=o.w;BM2[i]=o.b2;V2[i]=o.v2;dn++;anTxt(t('anl')+Math.round(dn*100/N)+'%')}})())};
+for(let k=1;k<np;k++)mkPool(1).then(a=>{const w=a[0];if(!w){npE=Math.max(1,npE-1);return}if(closed||nx>=N||anAbort){try{w.terminate()}catch(e){}return}extra.push(w);run(w)});
+run(sf);
+for(let n=-1;n!=loops.length;){n=loops.length;await Promise.all(loops)}
+closed=true;extra.forEach(w=>{try{w.terminate()}catch(e){}})}
+else{for(let i=0;i<N;i++){if(anAbort)break;anTxt(t('anl')+Math.round(i*100/(N-1||1))+'%');await new Promise(r=>setTimeout(r,0));const o=await evalFen(fens[i],null,Math.max(60,(DL-Date.now())/(N-i)));E[i]=o.v;BM[i]=o.b;W[i]=o.w;BM2[i]=o.b2;V2[i]=o.v2}}
 if(anAbort){anAbort=false;loadPGN(pgn);busy=false;anRun=false;spin(false);draw();return}
 const BK=await bkP;loadPGN(pgn);busy=false;
 const cnt={w:{},b:{}},ac={w:[],b:[]},sv={p:1,n:3,b:3,r:5,q:9,k:0};CL=[];let inBook=true;
